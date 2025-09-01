@@ -104,11 +104,10 @@ The script creates the following in the `results/` folder:
 ## ✨ Notes
 
 
+
 * The raw data are entered as colony counts (`colonies`) obtained from drop-plating of serial dilutions (`dilution_log`). The script automatically computes **CFU/mL** according to the formula:
 
-	$$
-	CFU/mL = \frac{\text{colonies}}{\text{plated volume in mL}} \times 10^{|\text{dilution_log}|}
-	$$
+	CFU/mL = (colonies) / (plated volume in mL) × 10^(abs(dilution_log))
 
 	Example: 30 colonies at dilution 10⁻⁵ with 10 µL plated = 3.0 × 10⁸ CFU/mL.
 
