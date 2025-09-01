@@ -1,8 +1,4 @@
-"""
-uv_fe_analysis.py
-Modular package for viability/UVC/Fe3+ data analysis and plotting.
-Adapt input/output paths and column names to match your CSV.
-"""
+
 
 import numpy as np
 import pandas as pd
@@ -16,28 +12,36 @@ from statsmodels.genmod.families import NegativeBinomial, Binomial
 import os
 import json
 
-"""
-Expected CSV columns (minimum):
-sample_id, organism, treatment (e.g., control/5mM/10mM), fluence_Jm2, replicate, CFU
-For presence/absence, set CFU = 0 when no colony is observed.
-"""
+
+
+
+def compute_cfu(colonies, dilution_log, plated_uL):
+    """Calculate CFU/mL from colony count, dilution log, and plated volume (µL)."""
+    dilution_factor = 10 ** abs(dilution_log)
+    return colonies / (plated_uL / 1000.0) * dilution_factor
+
+
 def load_data(csv_path):
     df = pd.read_csv(csv_path)
     df['fluence_Jm2'] = df['fluence_Jm2'].astype(float)
-    df['CFU'] = df['CFU'].astype(float)
+    if {'colonies', 'dilution_log', 'plated_uL'}.issubset(df.columns):
+        df['CFU_per_mL'] = compute_cfu(df['colonies'], df['dilution_log'], df['plated_uL'])
+    else:
+        raise ValueError("CSV must contain columns: colonies, dilution_log, plated_uL")
     return df
 
 # ---------------------------------------------
 # Função: calcular viabilidade (N/N0) por condição
 # ---------------------------------------------
+
+
 def compute_viability(df, control_label='control'):
-    # Calculate N0 (mean CFU for control, fluence=0) per organism and replicate
+    """Calculate relative viability (N/N0) using CFU_per_mL."""
     df = df.copy()
     controls = df[(df['fluence_Jm2']==0) & (df['treatment']==control_label)]
-    n0 = controls.groupby(['organism','replicate'])['CFU'].mean().reset_index().rename(columns={'CFU':'N0'})
+    n0 = controls.groupby(['organism','replicate'])['CFU_per_mL'].mean().reset_index().rename(columns={'CFU_per_mL':'N0'})
     df = df.merge(n0, on=['organism','replicate'], how='left')
-    df['viability'] = df['CFU'] / df['N0']
-    # Avoid division by zero
+    df['viability'] = df['CFU_per_mL'] / df['N0']
     df.loc[df['N0']<=0,'viability'] = np.nan
     return df
 
@@ -182,41 +186,35 @@ def run_pipeline(csv_path, outdir='results'):
     os.makedirs(outdir, exist_ok=True)
     df = load_data(csv_path)
     df = compute_viability(df)
+
     organisms = df['organism'].unique()
     summary_ld = {}
     for org in organisms:
         for treat in df[df.organism==org]['treatment'].unique():
             sub = df[(df.organism==org)&(df.treatment==treat)]
-            # Drop NA values
             sub = sub.dropna(subset=['viability','fluence_Jm2'])
             if len(sub) < 6:
                 print(f'Few points for {org} {treat} — skipping fit.')
                 continue
             x = sub['fluence_Jm2'].values
             y = sub['viability'].values
-            # Fit hormetic model
             p0 = {'ld50': np.median(x[x>0]) if np.any(x>0) else 100.0, 'b':1.0, 'd':1.0, 'f':0.0, 'g':0.001}
             try:
                 res_h = fit_brain_cousens(x,y,p0=p0)
             except Exception as e:
                 print('Hormetic fit error:', e)
                 continue
-            # Fit non-hormetic (force f=0)
             p0_no = p0.copy(); p0_no['f'] = 0.0
             try:
                 res_noh = fit_brain_cousens(x,y,p0=p0_no)
             except:
                 res_noh = None
-            # Bootstrap LD50
             boot = bootstrap_ld50(x,y, lambda xx,yy: fit_brain_cousens(xx,yy,p0=p0), n_boot=800)
             ld50 = res_h.params['ld50'].value
             ci_low, ci_high = boot['ld50_ci95']
             summary_ld[f'{org}_{treat}'] = (ld50, ci_low, ci_high)
-            # Save plot
             plot_viability_with_fit(sub, org, treat, fit_result=res_h)
-    # Forest plot
     forest_ld50(summary_ld)
-    # Save summary
     with open(os.path.join(outdir,'ld50_summary.json'),'w') as f:
         json.dump(summary_ld, f, indent=2)
     print('Pipeline finished — results in', outdir)

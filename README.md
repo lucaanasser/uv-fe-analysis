@@ -44,15 +44,27 @@ pip install -r requirements.txt
 ```
 
 ### 4. Prepare your input data
+### Example CSV
 
-A CSV file with at least these columns:
+```csv
+sample_id,organism,treatment,fluence_Jm2,replicate,dilution_log,colonies,plated_uL
+1,E.coli,control,0,1,-5,29,10
+2,E.coli,control,0,1,-5,29,10
+3,E.coli,control,0,1,-5,21,10
+4,E.coli,Fe10mM,0,1,-5,0,10
+```
+
+
+A CSV file with **these required columns**:
 
 ```
-sample_id, organism, treatment, fluence_Jm2, replicate, CFU
+sample_id,organism,treatment,fluence_Jm2,replicate,dilution_log,colonies,plated_uL
 ```
 
+* `colonies`: number of colonies counted (0 if no growth)
+* `dilution_log`: log of dilution (e.g. -3 for 10⁻³, -5 for 10⁻⁵)
+* `plated_uL`: plated volume in µL (typically 10 µL per drop)
 * `fluence_Jm2`: UVC dose
-* `CFU`: colony forming units (0 if no growth)
 * `treatment`: e.g. control, 5mM Fe³⁺, Fe-solid
 
 Place your file under the `data/` folder.
@@ -91,6 +103,17 @@ The script creates the following in the `results/` folder:
 
 ## ✨ Notes
 
+
+* The raw data are entered as colony counts (`colonies`) obtained from drop-plating of serial dilutions (`dilution_log`). The script automatically computes **CFU/mL** according to the formula:
+
+	$$
+	CFU/mL = \frac{\text{colonies}}{\text{plated volume in mL}} \times 10^{|\text{dilution_log}|}
+	$$
+
+	Example: 30 colonies at dilution 10⁻⁵ with 10 µL plated = 3.0 × 10⁸ CFU/mL.
+
+* All analyses, plots and statistics use `CFU_per_mL` (not raw colony counts).
+* If `colonies=0`, the value of `CFU_per_mL` will be zero and handled correctly in all calculations.
 * Results help evaluate whether iron (in solution or desiccated form) protects or kills cells under UVC.
 * Negative results (no growth detected) are statistically handled using **confidence intervals for proportions**.
 * The code is modular and can be extended with additional models or statistical tests.
