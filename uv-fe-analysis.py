@@ -147,12 +147,12 @@ def plot_viability_with_fit(df, organism, treatment, fit_result=None, savepath=N
     plt.title(f'{organism} — {treatment}')
     plt.legend()
 
-        outdir = 'results'
-        os.makedirs(outdir, exist_ok=True)
-        fname = f'viab_{organism}_{treatment}.png'
-        savepath = os.path.join(outdir, fname)
-        plt.savefig(savepath, dpi=300, bbox_inches='tight')
-        plt.close()
+    outdir = 'results'
+    os.makedirs(outdir, exist_ok=True)
+    fname = f'viab_{organism}_{treatment}.png'
+    savepath = os.path.join(outdir, fname)
+    plt.savefig(savepath, dpi=300, bbox_inches='tight')
+    plt.close()
 
 def forest_ld50(ld_results, savepath=None):
     # ld_results: dict of label -> (ld50, ci_low, ci_high)
@@ -201,10 +201,11 @@ def run_pipeline(csv_path, outdir='results'):
             except Exception as e:
                 print('Hormetic fit error:', e)
                 continue
-            p0_no = p0.copy(); p0_no['f'] = 0.0
+            p0_no = p0.copy()
+            p0_no['f'] = 0.0
             try:
                 res_noh = fit_brain_cousens(x,y,p0=p0_no)
-            except:
+            except Exception:
                 res_noh = None
             boot = bootstrap_ld50(x,y, lambda xx,yy: fit_brain_cousens(xx,yy,p0=p0), n_boot=800)
             ld50 = res_h.params['ld50'].value
