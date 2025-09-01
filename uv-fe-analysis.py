@@ -1,5 +1,3 @@
-
-
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -30,9 +28,7 @@ def load_data(csv_path):
         raise ValueError("CSV must contain columns: colonies, dilution_log, plated_uL")
     return df
 
-# ---------------------------------------------
-# Função: calcular viabilidade (N/N0) por condição
-# ---------------------------------------------
+
 
 
 def compute_viability(df, control_label='control'):
@@ -150,13 +146,13 @@ def plot_viability_with_fit(df, organism, treatment, fit_result=None, savepath=N
     plt.ylabel('Viability (N/N0)')
     plt.title(f'{organism} — {treatment}')
     plt.legend()
-    # Always save in results folder
-    outdir = 'results'
-    os.makedirs(outdir, exist_ok=True)
-    fname = f'viab_{organism}_{treatment}.png'
-    savepath = os.path.join(outdir, fname)
-    plt.savefig(savepath, dpi=300, bbox_inches='tight')
-    plt.close()
+
+        outdir = 'results'
+        os.makedirs(outdir, exist_ok=True)
+        fname = f'viab_{organism}_{treatment}.png'
+        savepath = os.path.join(outdir, fname)
+        plt.savefig(savepath, dpi=300, bbox_inches='tight')
+        plt.close()
 
 def forest_ld50(ld_results, savepath=None):
     # ld_results: dict of label -> (ld50, ci_low, ci_high)
@@ -170,7 +166,7 @@ def forest_ld50(ld_results, savepath=None):
     ax.set_yticks(y); ax.set_yticklabels(labels)
     ax.set_xscale('log')
     ax.set_xlabel('LD50 (J/m²) [log scale]')
-    # Always save in results folder
+
     outdir = 'results'
     os.makedirs(outdir, exist_ok=True)
     fname = 'forest_ld50.png'
@@ -178,9 +174,10 @@ def forest_ld50(ld_results, savepath=None):
     plt.savefig(savepath, dpi=300, bbox_inches='tight')
     plt.close()
 
-# ------------------------------------------------
-# Example pipeline
-# ------------------------------------------------
+
+"""
+Main analysis pipeline: loads data, computes viability, fits models, and saves results.
+"""
 def run_pipeline(csv_path, outdir='results'):
     outdir = 'results'
     os.makedirs(outdir, exist_ok=True)
@@ -219,13 +216,11 @@ def run_pipeline(csv_path, outdir='results'):
         json.dump(summary_ld, f, indent=2)
     print('Pipeline finished — results in', outdir)
 
-"""
-Main entry point for CLI usage
-"""
+
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--csv', required=True, help='CSV com dados conforme descrito')
-    parser.add_argument('--out', default='results', help='pasta de saída')
+    parser.add_argument('--csv', required=True, help='CSV file with required columns')
+    parser.add_argument('--out', default='results', help='Output folder')
     args = parser.parse_args()
     run_pipeline(args.csv, outdir=args.out)

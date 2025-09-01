@@ -122,5 +122,3 @@ The script creates the following in the `results/` folder:
 ## 📜 License
 
 MIT – feel free to use and adapt.
-
-```
