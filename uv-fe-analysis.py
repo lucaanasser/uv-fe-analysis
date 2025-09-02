@@ -178,43 +178,109 @@ def forest_ld50(ld_results, savepath=None):
 """
 Main analysis pipeline: loads data, computes viability, fits models, and saves results.
 """
+
+def analyze_fe(df, organism, treatment='Fe10mM', control_label='control', outdir='results'):
+    from scipy import stats
+    ctrl = df[df.treatment==control_label]['viability'].dropna()
+    treat = df[df.treatment==treatment]['viability'].dropna()
+    results = {
+        'mean_ctrl': float(ctrl.mean()) if len(ctrl)>0 else None,
+        'mean_treat': float(treat.mean()) if len(treat)>0 else None,
+        'n_ctrl': int(len(ctrl)),
+        'n_treat': int(len(treat))
+    }
+    if len(ctrl)>1 and len(treat)>1:
+        ttest = stats.ttest_ind(ctrl, treat, equal_var=False)
+        mw = stats.mannwhitneyu(ctrl, treat, alternative='two-sided')
+        results['t_test_p'] = float(ttest.pvalue)
+        results['mannwhitney_p'] = float(mw.pvalue)
+    else:
+        results['t_test_p'] = None
+        results['mannwhitney_p'] = None
+
+    # Bar plot
+    import matplotlib.pyplot as plt
+    means = df.groupby('treatment')['viability'].mean()
+    errors = df.groupby('treatment')['viability'].sem()
+    means.plot.bar(yerr=errors, capsize=4)
+    plt.ylabel('Viabilidade (N/N0)')
+    plt.title(f'{organism} — Fe³⁺ 10mM')
+    os.makedirs(outdir, exist_ok=True)
+    fname = f'fe_{organism}.png'
+    savepath = os.path.join(outdir, fname)
+    plt.savefig(savepath, dpi=300, bbox_inches='tight')
+    plt.close()
+    return results
+
 def run_pipeline(csv_path, outdir='results'):
-    outdir = 'results'
     os.makedirs(outdir, exist_ok=True)
     df = load_data(csv_path)
     df = compute_viability(df)
 
-    organisms = df['organism'].unique()
     summary_ld = {}
-    for org in organisms:
-        for treat in df[df.organism==org]['treatment'].unique():
-            sub = df[(df.organism==org)&(df.treatment==treat)]
-            sub = sub.dropna(subset=['viability','fluence_Jm2'])
-            if len(sub) < 6:
-                print(f'Few points for {org} {treat} — skipping fit.')
-                continue
-            x = sub['fluence_Jm2'].values
-            y = sub['viability'].values
-            p0 = {'ld50': np.median(x[x>0]) if np.any(x>0) else 100.0, 'b':1.0, 'd':1.0, 'f':0.0, 'g':0.001}
-            try:
-                res_h = fit_brain_cousens(x,y,p0=p0)
-            except Exception as e:
-                print('Hormetic fit error:', e)
-                continue
-            p0_no = p0.copy()
-            p0_no['f'] = 0.0
-            try:
-                res_noh = fit_brain_cousens(x,y,p0=p0_no)
-            except Exception:
-                res_noh = None
-            boot = bootstrap_ld50(x,y, lambda xx,yy: fit_brain_cousens(xx,yy,p0=p0), n_boot=800)
-            ld50 = res_h.params['ld50'].value
-            ci_low, ci_high = boot['ld50_ci95']
-            summary_ld[f'{org}_{treat}'] = (ld50, ci_low, ci_high)
-            plot_viability_with_fit(sub, org, treat, fit_result=res_h)
-    forest_ld50(summary_ld)
-    with open(os.path.join(outdir,'ld50_summary.json'),'w') as f:
-        json.dump(summary_ld, f, indent=2)
+    summary_fe = {}
+
+    # Detect experiment type
+    if 'experiment' in df.columns:
+        experiments = df['experiment'].unique()
+    else:
+        experiments = ['UV']  # fallback if not present
+
+    for experiment in experiments:
+        exp_df = df[df['experiment']==experiment] if 'experiment' in df.columns else df
+        organisms = exp_df['organism'].unique()
+        for org in organisms:
+            org_df = exp_df[exp_df.organism==org]
+            if experiment == 'UV':
+                for treat in org_df['treatment'].unique():
+                    sub = org_df[(org_df.treatment==treat)].dropna(subset=['viability','fluence_Jm2'])
+                    if treat == 'control' or len(sub) < 6:
+                        continue
+                    x = sub['fluence_Jm2'].values
+                    y = sub['viability'].values
+                    p0 = {'ld50': np.median(x[x>0]) if np.any(x>0) else 100.0, 'b':1.0, 'd':1.0, 'f':0.0, 'g':0.001}
+                    try:
+                        res_h = fit_brain_cousens(x, y, p0=p0)
+                    except Exception as e:
+                        print('Hormetic fit error:', e)
+                        continue
+                    p0_no = p0.copy(); p0_no['f'] = 0.0
+                    try:
+                        res_noh = fit_brain_cousens(x, y, p0=p0_no)
+                    except Exception:
+                        res_noh = None
+                    if res_noh is not None:
+                        aic_comparison = compare_models(res_h, res_noh)
+                        if aic_comparison['aic_hormetic'] < aic_comparison['aic_nohormetic']:
+                            best_fit = res_h
+                            best_model = 'hormetic'
+                        else:
+                            best_fit = res_noh
+                            best_model = 'non-hormetic'
+                    else:
+                        best_fit = res_h
+                        best_model = 'hormetic'
+                    boot = bootstrap_ld50(x, y, lambda xx, yy: fit_brain_cousens(xx, yy, p0=p0 if best_model=='hormetic' else p0_no), n_boot=800)
+                    ld50 = best_fit.params['ld50'].value
+                    ci_low, ci_high = boot['ld50_ci95']
+                    summary_ld[f'{experiment}_{org}_{treat}'] = (ld50, ci_low, ci_high)
+                    plot_viability_with_fit(sub, org, treat, fit_result=best_fit)
+            elif experiment == 'Fe':
+                # Assume only one Fe treatment (e.g., Fe10mM) and control
+                treatments = org_df['treatment'].unique()
+                fe_treat = [t for t in treatments if t != 'control']
+                treat = fe_treat[0] if fe_treat else 'Fe10mM'
+                results = analyze_fe(org_df, organism=org, treatment=treat, control_label='control', outdir=outdir)
+                summary_fe[f'{experiment}_{org}'] = results
+
+    # Save results
+    if summary_ld:
+        forest_ld50(summary_ld)
+        with open(os.path.join(outdir,'ld50_summary.json'),'w') as f:
+            json.dump(summary_ld, f, indent=2)
+    if summary_fe:
+        with open(os.path.join(outdir,'fe_summary.json'),'w') as f:
+            json.dump(summary_fe, f, indent=2)
     print('Pipeline finished — results in', outdir)
 
 
