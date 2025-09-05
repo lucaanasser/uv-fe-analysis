@@ -2,11 +2,15 @@ import numpy as np
 import pandas as pd
 from typing import Dict, Any, Tuple
 from numpy.typing import ArrayLike
+from dataclasses import dataclass
+
+from scipy import optimize  
+from scipy import stats  
 
 try:
-    import statsmodels.api as sm  # type: ignore
+    import statsmodels.api as sm 
     from statsmodels.regression.mixed_linear_model import MixedLM  # type: ignore
-except Exception:  # pragma: no cover
+except Exception: 
     sm = None
     MixedLM = None
 
@@ -189,6 +193,310 @@ def fit_weibull(doses, surv_frac, max_iter=2000):
     # From Y = p*log(x) + b ; b = -p*log(delta) => delta = exp(-b/p)
     delta = np.exp(-b / p) if p != 0 else np.nan
     return {"delta": float(delta), "p": float(p)}
+
+
+# =============================================================
+# Additional inactivation model fits (for peer-review robustness)
+# =============================================================
+
+def _safe_aic(n_obs: int, sse: float, k_params: int) -> float:
+    if not np.isfinite(sse) or sse <= 0 or n_obs <= 0:
+        return np.nan
+    return n_obs * np.log(sse / n_obs) + 2 * k_params
+
+
+def fit_power_loglog(doses, surv_frac):
+    """Fit power-law (1/x-type) model in log-log space excluding dose 0.
+
+    Model: log10(S) = a + b * log10(dose)
+    If b == -1 e^{a} equiv a curva ~ 1/dose.
+
+    Returns dict with a, b, slope_log10_equivalent (per J/m2 at mean dose), AIC, R2.
+    """
+    x = np.asarray(doses, dtype=float)
+    s = np.asarray(surv_frac, dtype=float)
+    mask = (x > 0) & (s > 0) & (s <= 1)
+    x = x[mask]
+    s = s[mask]
+    if x.size < 3:
+        return {"a": np.nan, "b": np.nan, "AIC": np.nan, "R2": np.nan}
+    X = np.log10(x)
+    Y = np.log10(s)
+    A = np.vstack([np.ones_like(X), X]).T
+    coeffs, _, _, _ = np.linalg.lstsq(A, Y, rcond=None)
+    a, b = coeffs
+    y_hat = a + b * X
+    resid = Y - y_hat
+    SSE = np.sum(resid**2)
+    SST = np.sum((Y - np.mean(Y))**2)
+    R2 = 1 - SSE / SST if SST > 0 else np.nan
+    AIC = _safe_aic(x.size, SSE, 2)
+    return {"a": float(a), "b": float(b), "AIC": float(AIC), "R2": float(R2)}
+
+
+def fit_biphasic(doses, surv_frac):
+    """Fit biphasic model: S = f*exp(-k1*D) + (1-f)*exp(-k2*D).
+
+    Constraints: 0<f<1; k1>0, k2>0.
+    Returns dict with f,k1,k2,AIC (log10 residual SSE).
+    """
+    x = np.asarray(doses, dtype=float)
+    s = np.asarray(surv_frac, dtype=float)
+    mask = (x >= 0) & (s > 0) & (s <= 1)
+    x = x[mask]
+    s = s[mask]
+    if x.size < 5:  
+        return {"f": np.nan, "k1": np.nan, "k2": np.nan, "AIC": np.nan}
+
+    def model(D, f, k1, k2):
+        return f * np.exp(-k1 * D) + (1 - f) * np.exp(-k2 * D)
+
+    guess = [0.7, 1e-3, 1e-4]
+
+    bounds = ([1e-3, 1e-8, 1e-8], [0.999, 10, 10])
+    try:
+        popt, _ = optimize.curve_fit(model, x, s, p0=guess, bounds=bounds, maxfev=20000)
+        f, k1, k2 = popt
+        pred = model(x, f, k1, k2)
+        Y = np.log10(s)
+        Yhat = np.log10(np.clip(pred, 1e-12, 1))
+        resid = Y - Yhat
+        SSE = np.sum(resid**2)
+        AIC = _safe_aic(x.size, SSE, 3)
+        return {"f": float(f), "k1": float(k1), "k2": float(k2), "AIC": float(AIC)}
+    except Exception:
+        return {"f": np.nan, "k1": np.nan, "k2": np.nan, "AIC": np.nan}
+
+
+def fit_shoulder(doses, surv_frac):
+    """Fit simple shoulder model (Geeraerd-type simplified):
+
+    S = 1                           if D <= D0
+        exp(-k*(D-D0))              if D >  D0
+
+    Fit via nonlinear least squares on survival fraction.
+    Returns dict with D0, k, AIC (log10 residual SSE).
+    """
+    x = np.asarray(doses, dtype=float)
+    s = np.asarray(surv_frac, dtype=float)
+    mask = (x >= 0) & (s > 0) & (s <= 1)
+    x = x[mask]
+    s = s[mask]
+    if x.size < 5:
+        return {"D0": np.nan, "k": np.nan, "AIC": np.nan}
+
+    def model(D, D0, k):
+        D = np.asarray(D)
+        out = np.where(D <= D0, 1.0, np.exp(-k * (D - D0)))
+        return out
+
+    guess = [x.min() * 0.2, 1e-3]
+    bounds = ([0, 1e-8], [x.max() * 0.8, 1])
+    try:
+        popt, _ = optimize.curve_fit(model, x, s, p0=guess, bounds=bounds, maxfev=20000)
+        D0, k = popt
+        pred = model(x, D0, k)
+        Y = np.log10(s)
+        Yhat = np.log10(np.clip(pred, 1e-12, 1))
+        resid = Y - Yhat
+        SSE = np.sum(resid**2)
+        AIC = _safe_aic(x.size, SSE, 2)
+        return {"D0": float(D0), "k": float(k), "AIC": float(AIC)}
+    except Exception:
+        return {"D0": np.nan, "k": np.nan, "AIC": np.nan}
+
+
+def fit_glm_counts(df: pd.DataFrame):
+    """Fit Poisson and Negative Binomial GLMs on raw colony counts.
+
+    Expects columns: colonies, dose_J_m2, dilution_log, plated_uL.
+    Uses offset = log( dilution_factor * plated_mL ).
+    Returns dict with poisson_slope_log10, nb_slope_log10, their SEs, AICs, dispersion.
+    """
+    if sm is None:
+        return {k: np.nan for k in [
+            'poisson_slope_log10','poisson_slope_log10_se','AIC_poisson','dispersion_poisson',
+            'nb_slope_log10','nb_slope_log10_se','AIC_nb','model_preferred_glm'
+        ]}
+    sub = df.dropna(subset=["colonies", "dose_J_m2", "dilution_log", "plated_uL"]).copy()
+    if sub.empty or sub["dose_J_m2"].nunique() < 2:
+        return {k: np.nan for k in [
+            'poisson_slope_log10','poisson_slope_log10_se','AIC_poisson','dispersion_poisson',
+            'nb_slope_log10','nb_slope_log10_se','AIC_nb','model_preferred_glm'
+        ]}
+    sub["dilution_factor"] = 10 ** np.abs(sub["dilution_log"])
+    sub["plated_mL"] = sub["plated_uL"] / 1000.0
+    sub["offset"] = np.log(sub["dilution_factor"] * sub["plated_mL"])
+    try:
+        X = sm.add_constant(sub["dose_J_m2"])  # intercept
+        poisson_model = sm.GLM(sub["colonies"], X, family=sm.families.Poisson(), offset=sub["offset"]).fit()
+        beta1 = poisson_model.params.get("dose_J_m2", np.nan)
+        beta1_se = poisson_model.bse.get("dose_J_m2", np.nan)
+        mu_hat = poisson_model.fittedvalues
+        pearson = np.sum((sub["colonies"] - mu_hat) ** 2 / mu_hat)
+        dispersion = pearson / (sub.shape[0] - 2) if sub.shape[0] > 2 else np.nan
+        try:
+            nb_model = sm.GLM(sub["colonies"], X, family=sm.families.NegativeBinomial(), offset=sub["offset"]).fit()
+            nb_beta1 = nb_model.params.get("dose_J_m2", np.nan)
+            nb_beta1_se = nb_model.bse.get("dose_J_m2", np.nan)
+            AIC_nb = nb_model.aic
+        except Exception:
+            nb_beta1 = np.nan
+            nb_beta1_se = np.nan
+            AIC_nb = np.nan
+        slope_log10 = beta1 / np.log(10) if np.isfinite(beta1) else np.nan
+        slope_log10_se = beta1_se / np.log(10) if np.isfinite(beta1_se) else np.nan
+        nb_slope_log10 = nb_beta1 / np.log(10) if np.isfinite(nb_beta1) else np.nan
+        nb_slope_log10_se = nb_beta1_se / np.log(10) if np.isfinite(nb_beta1_se) else np.nan
+        model_pref = None
+        if np.isfinite(AIC_nb) and poisson_model.aic:
+            model_pref = 'NB' if AIC_nb + 2 < poisson_model.aic else 'Poisson'
+        return {
+            'poisson_slope_log10': float(slope_log10),
+            'poisson_slope_log10_se': float(slope_log10_se),
+            'AIC_poisson': float(poisson_model.aic),
+            'dispersion_poisson': float(dispersion),
+            'nb_slope_log10': float(nb_slope_log10),
+            'nb_slope_log10_se': float(nb_slope_log10_se),
+            'AIC_nb': float(AIC_nb) if np.isfinite(AIC_nb) else np.nan,
+            'model_preferred_glm': model_pref
+        }
+    except Exception:
+        return {k: np.nan for k in [
+            'poisson_slope_log10','poisson_slope_log10_se','AIC_poisson','dispersion_poisson',
+            'nb_slope_log10','nb_slope_log10_se','AIC_nb','model_preferred_glm'
+        ]}
+
+
+# =============================================================
+# ANOVA & lack-of-fit tests
+# =============================================================
+
+def one_way_anova(doses, responses):
+    """One-way ANOVA of responses grouped by exact dose values.
+
+    Args:
+        doses: array-like dose values (categorical levels for ANOVA).
+        responses: array-like response (e.g., log10_surv per replicate).
+
+    Returns dict with F, p, df_between, df_within.
+    """
+    x = np.asarray(doses)
+    y = np.asarray(responses, dtype=float)
+    mask = ~np.isnan(x) & ~np.isnan(y)
+    x = x[mask]
+    y = y[mask]
+    if x.size < 3 or np.unique(x).size < 2:
+        return {"anova_F": np.nan, "anova_p": np.nan, "df_between": 0, "df_within": 0}
+    levels = np.unique(x)
+    k = levels.size
+    groups = [y[x == lv] for lv in levels]
+    n_total = y.size
+    overall_mean = np.mean(y)
+    ss_between = sum(g.size * (np.mean(g) - overall_mean) ** 2 for g in groups)
+    ss_within = sum(np.sum((g - np.mean(g)) ** 2) for g in groups)
+    df_between = k - 1
+    df_within = n_total - k
+    if df_within <= 0 or ss_within <= 0:
+        return {"anova_F": np.nan, "anova_p": np.nan, "df_between": df_between, "df_within": df_within}
+    ms_between = ss_between / df_between
+    ms_within = ss_within / df_within
+    F = ms_between / ms_within if ms_within > 0 else np.nan
+    p = 1 - stats.f.cdf(F, df_between, df_within) if np.isfinite(F) else np.nan
+    return {"anova_F": float(F), "anova_p": float(p), "df_between": int(df_between), "df_within": int(df_within)}
+
+
+def lack_of_fit_test_through_origin(doses, responses, slope):
+    """Lack-of-fit F-test for model y = slope * dose (no intercept) using replicate pure error.
+
+    Args:
+        doses: dose values (can repeat).
+        responses: observed log10_surv values (per replicate).
+        slope: fitted slope from all data.
+
+    Returns dict with F_lof, p_lof, df_lof, df_pe.
+    """
+    x = np.asarray(doses, dtype=float)
+    y = np.asarray(responses, dtype=float)
+    mask = ~np.isnan(x) & ~np.isnan(y)
+    x = x[mask]
+    y = y[mask]
+    unique_doses = np.unique(x)
+    k = unique_doses.size
+    if k < 2:
+        return {"lof_F": np.nan, "lof_p": np.nan, "df_lof": 0, "df_pe": 0}
+    y_hat = slope * x
+    resid = y - y_hat
+    sse_model = np.sum(resid ** 2)
+    sse_pe = 0.0
+    df_pe = 0
+    for d in unique_doses:
+        yd = y[x == d]
+        if yd.size > 1:
+            sse_pe += np.sum((yd - np.mean(yd)) ** 2)
+            df_pe += yd.size - 1
+    df_lof = k - 1  
+    ss_lof = sse_model - sse_pe
+    if df_pe <= 0 or ss_lof < 0:
+        return {"lof_F": np.nan, "lof_p": np.nan, "df_lof": int(df_lof), "df_pe": int(df_pe)}
+    ms_lof = ss_lof / df_lof if df_lof > 0 else np.nan
+    ms_pe = sse_pe / df_pe if df_pe > 0 else np.nan
+    F = ms_lof / ms_pe if (ms_pe and ms_pe > 0) else np.nan
+    p = 1 - stats.f.cdf(F, df_lof, df_pe) if np.isfinite(F) else np.nan
+    return {"lof_F": float(F), "lof_p": float(p), "df_lof": int(df_lof), "df_pe": int(df_pe)}
+    sub = df.dropna(subset=["colonies", "dose_J_m2", "dilution_log", "plated_uL"]).copy()
+    if sub.empty or sub["dose_J_m2"].nunique() < 2:
+        return {k: np.nan for k in [
+            'poisson_slope_log10','poisson_slope_log10_se','AIC_poisson','dispersion_poisson',
+            'nb_slope_log10','nb_slope_log10_se','AIC_nb','model_preferred_glm'
+        ]}
+    # Offset construction
+    sub["dilution_factor"] = 10 ** np.abs(sub["dilution_log"])
+    sub["plated_mL"] = sub["plated_uL"] / 1000.0
+    sub["offset"] = np.log(sub["dilution_factor"] * sub["plated_mL"])  # log exposure volume
+    try:
+        # Poisson GLM
+        X = sm.add_constant(sub["dose_J_m2"])  # intercept + slope
+        poisson_model = sm.GLM(sub["colonies"], X, family=sm.families.Poisson(), offset=sub["offset"]).fit()
+        beta1 = poisson_model.params.get("dose_J_m2", np.nan)
+        beta1_se = poisson_model.bse.get("dose_J_m2", np.nan)
+        # Dispersion (Pearson)
+        mu_hat = poisson_model.fittedvalues
+        pearson = np.sum(((sub["colonies"] - mu_hat) ** 2 - mu_hat) / mu_hat)
+        dispersion = pearson / (sub.shape[0] - 2) if sub.shape[0] > 2 else np.nan
+        # NB GLM
+        try:
+            nb_model = sm.GLM(sub["colonies"], X, family=sm.families.NegativeBinomial(), offset=sub["offset"]).fit()
+            nb_beta1 = nb_model.params.get("dose_J_m2", np.nan)
+            nb_beta1_se = nb_model.bse.get("dose_J_m2", np.nan)
+            AIC_nb = nb_model.aic
+        except Exception:
+            nb_beta1 = np.nan
+            nb_beta1_se = np.nan
+            AIC_nb = np.nan
+        # Convert slopes to log10 survival slopes: log(mu_d / mu_0) = beta1 * dose; log10(S) = beta1/ln10 * dose
+        slope_log10 = beta1 / np.log(10) if np.isfinite(beta1) else np.nan
+        slope_log10_se = beta1_se / np.log(10) if np.isfinite(beta1_se) else np.nan
+        nb_slope_log10 = nb_beta1 / np.log(10) if np.isfinite(nb_beta1) else np.nan
+        nb_slope_log10_se = nb_beta1_se / np.log(10) if np.isfinite(nb_beta1_se) else np.nan
+        model_pref = None
+        if np.isfinite(AIC_nb) and poisson_model.aic:
+            model_pref = 'NB' if AIC_nb + 2 < poisson_model.aic else 'Poisson'
+        return {
+            'poisson_slope_log10': float(slope_log10),
+            'poisson_slope_log10_se': float(slope_log10_se),
+            'AIC_poisson': float(poisson_model.aic),
+            'dispersion_poisson': float(dispersion),
+            'nb_slope_log10': float(nb_slope_log10),
+            'nb_slope_log10_se': float(nb_slope_log10_se),
+            'AIC_nb': float(AIC_nb) if np.isfinite(AIC_nb) else np.nan,
+            'model_preferred_glm': model_pref
+        }
+    except Exception:
+        return {k: np.nan for k in [
+            'poisson_slope_log10','poisson_slope_log10_se','AIC_poisson','dispersion_poisson',
+            'nb_slope_log10','nb_slope_log10_se','AIC_nb','model_preferred_glm'
+        ]}
 
 
 def compute_cooks_distance_through_origin(x, y, resid):

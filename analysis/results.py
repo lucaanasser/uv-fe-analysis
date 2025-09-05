@@ -60,21 +60,47 @@ class UVCResultMain:
     D10: float
     D10_CI95: list
     D10_wls: float | None
+    D90: float | None
+    D99: float | None
+    D999: float | None
     LD50_dose: float | None
     LD50_CI95: list | None
     LD50_wls: float | None
     R2_adj: float | None
     AIC_log_linear: float | None
-    AIC_weibull: float | None
-    weibull_delta: float | None
-    weibull_p: float | None
+    AIC_power: float | None
+    AIC_biphasic: float | None
+    AIC_shoulder: float | None
+    power_a: float | None
+    power_b: float | None
+    biphasic_f: float | None
+    biphasic_k1: float | None
+    biphasic_k2: float | None
+    shoulder_D0: float | None
+    shoulder_k: float | None
     model_preferred: str | None
     mixed_slope: float | None
     mixed_slope_se: float | None
     mixed_var_intercept: float | None
+    poisson_slope_log10: float | None
+    poisson_slope_log10_se: float | None
+    nb_slope_log10: float | None
+    nb_slope_log10_se: float | None
+    AIC_poisson: float | None
+    AIC_nb: float | None
+    dispersion_poisson: float | None
+    model_preferred_glm: str | None
     detection_limit_CFU_per_mL: float
     any_full_zero_dose: bool
     n_doses: int
+    anova_F: float | None = None
+    anova_p: float | None = None
+    df_between: int | None = None
+    df_within: int | None = None
+    lof_F: float | None = None
+    lof_p: float | None = None
+    df_lof: int | None = None
+    df_pe: int | None = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

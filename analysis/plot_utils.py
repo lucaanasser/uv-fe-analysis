@@ -2,6 +2,7 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 import scipy.stats as stats
+from typing import Dict, Any
 
 PLOT_STYLE = {
     "figsize": (8,6),
@@ -73,6 +74,125 @@ def plot_survival_curve(df, organism, outdir, slope_fit=None, boot_bands=None, t
     style_axes(ax)
     ax.legend(frameon=False)
     save_fig(fig, outdir, f"{organism.replace(' ', '_')}_uvc_survival.png")
+
+
+def plot_survival_with_models(df, organism, outdir, mean_points=True, boot_bands=None, models: Dict[str, Dict[str, Any]]|None=None, title_suffix="UVC survival (model overlay)"):
+    """Plot empirical mean log10 survival with optional bootstrap band and selected model curves.
+
+    Args:
+        df: Raw replicated dataframe (needs columns dose_J_m2, log10_survival, survival_fraction).
+        organism: Organism name.
+        outdir: Output directory.
+        mean_points: If True scatter mean per dose; else all points.
+        boot_bands: Optional dict dose/low/high for band.
+        models: Dict mapping model label -> dict of parameters (expects keys used below).
+        title_suffix: Title text.
+    """
+    fig, ax = plt.subplots(figsize=PLOT_STYLE["figsize"])
+    if mean_points:
+        agg = df.groupby("dose_J_m2").agg(log10_survival=("log10_survival","mean")).reset_index()
+        ax.scatter(agg["dose_J_m2"], agg["log10_survival"], s=70, color=PLOT_STYLE["colors"][0], edgecolor="black", label="Média")
+    else:
+        ax.scatter(df["dose_J_m2"], df["log10_survival"], s=40, alpha=0.6, color=PLOT_STYLE["colors"][0], label="Replicados")
+    if boot_bands:
+        ax.fill_between(boot_bands["dose"], boot_bands["low"], boot_bands["high"], color=PLOT_STYLE["colors"][0], alpha=0.15, label="95% bootstrap")
+    if models:
+        doses = df["dose_J_m2"].unique()
+        d_min_pos = np.min(doses[doses>0]) if np.any(doses>0) else 1.0
+        x_line = np.linspace(0, doses.max()*1.05, 400)
+        x_line_pos = np.linspace(d_min_pos, doses.max()*1.05, 400)
+        color_cycle = plt.cm.tab10(np.linspace(0,1,len(models)))
+        for (i,(label, pars)) in enumerate(models.items()):
+            y_pred = None
+            if label == "log-linear" and np.isfinite(pars.get("slope", np.nan)):
+                y_pred = pars["slope"] * x_line
+                ax.plot(x_line, y_pred, color=color_cycle[i], lw=2, label=f"{label}")
+                continue
+            if label == "power" and all(np.isfinite([pars.get("a"), pars.get("b")])):
+                # log10(S)=a + b*log10(D)
+                xv = x_line_pos
+                y_pred = pars["a"] + pars["b"]*np.log10(xv)
+                ax.plot(xv, y_pred, color=color_cycle[i], lw=2, label=f"{label}")
+                continue
+            if label == "biphasic" and all(np.isfinite([pars.get("f"), pars.get("k1"), pars.get("k2")])):
+                xv = x_line
+                S = pars["f"]*np.exp(-pars["k1"]*xv) + (1-pars["f"])*np.exp(-pars["k2"]*xv)
+                y_pred = np.log10(np.clip(S,1e-12,1))
+                ax.plot(xv, y_pred, color=color_cycle[i], lw=2, label=f"{label}")
+                continue
+            if label == "shoulder" and all(np.isfinite([pars.get("D0"), pars.get("k")])):
+                xv = x_line
+                S = np.where(xv <= pars["D0"], 1.0, np.exp(-pars["k"]*(xv-pars["D0"])) )
+                y_pred = np.log10(np.clip(S,1e-12,1))
+                ax.plot(xv, y_pred, color=color_cycle[i], lw=2, label=f"{label}")
+                continue
+            # Weibull model removed
+    ax.set_xlabel("Dose (J/m²)", fontsize=12, weight="bold")
+    ax.set_ylabel("log10 Sobrevivência", fontsize=12, weight="bold")
+    ax.set_title(f"{organism} — {title_suffix}", fontsize=14, weight="bold", pad=20)
+    style_axes(ax)
+    ax.legend(frameon=False, fontsize=9)
+    save_fig(fig, outdir, f"{organism.replace(' ', '_')}_uvc_survival_best.png")
+
+
+def plot_model_comparison(df, organism, outdir, models: Dict[str, Dict[str, Any]], aic: Dict[str, float]|None=None):
+    """Create a dedicated model comparison figure with all model curves.
+
+    Args:
+        df: DataFrame with log10_survival.
+        organism: Name.
+        outdir: Output directory.
+        models: Dict of model parameters (same labels as overlay).
+        aic: Optional dict label->AIC to annotate.
+    """
+    fig, ax = plt.subplots(figsize=PLOT_STYLE["figsize"])
+    agg = df.groupby("dose_J_m2").agg(log10_survival=("log10_survival","mean")).reset_index()
+    ax.scatter(agg["dose_J_m2"], agg["log10_survival"], color="black", s=65, zorder=4, label="Média")
+    doses = df["dose_J_m2"].unique()
+    d_min_pos = np.min(doses[doses>0]) if np.any(doses>0) else 1.0
+    x_line = np.linspace(0, doses.max()*1.05, 500)
+    x_line_pos = np.linspace(d_min_pos, doses.max()*1.05, 500)
+    color_cycle = plt.cm.Dark2(np.linspace(0,1,len(models)))
+    legend_labels = []
+    for (i,(label, pars)) in enumerate(models.items()):
+        y_pred=None
+        if label == "log-linear" and np.isfinite(pars.get("slope", np.nan)):
+            y_pred = pars["slope"]*x_line
+            ax.plot(x_line, y_pred, color=color_cycle[i], lw=2)
+        elif label == "power" and all(np.isfinite([pars.get("a"), pars.get("b")])):
+            xv = x_line_pos
+            y_pred = pars["a"] + pars["b"]*np.log10(xv)
+            ax.plot(xv, y_pred, color=color_cycle[i], lw=2)
+        elif label == "biphasic" and all(np.isfinite([pars.get("f"), pars.get("k1"), pars.get("k2")])):
+            xv = x_line
+            S = pars["f"]*np.exp(-pars["k1"]*xv) + (1-pars["f"])*np.exp(-pars["k2"]*xv)
+            y_pred = np.log10(np.clip(S,1e-12,1))
+            ax.plot(xv, y_pred, color=color_cycle[i], lw=2)
+        elif label == "shoulder" and all(np.isfinite([pars.get("D0"), pars.get("k")])):
+            xv = x_line
+            S = np.where(xv <= pars["D0"], 1.0, np.exp(-pars["k"]*(xv-pars["D0"])) )
+            y_pred = np.log10(np.clip(S,1e-12,1))
+            ax.plot(xv, y_pred, color=color_cycle[i], lw=2)
+    # Weibull model removed
+        if y_pred is not None:
+            aic_txt = ''
+            if aic and label in aic and np.isfinite(aic[label]):
+                aic_txt = f" (AIC {aic[label]:.1f})"
+            legend_labels.append(f"{label}{aic_txt}")
+    ax.set_xlabel("Dose (J/m²)")
+    ax.set_ylabel("log10 Sobrevivência")
+    ax.set_title(f"{organism} — Comparação de Modelos")
+    style_axes(ax)
+    ax.legend(legend_labels, frameon=False, fontsize=9)
+    # Optional small AIC ranking textbox
+    if aic:
+        finite = {k:v for k,v in aic.items() if v is not None and np.isfinite(v)}
+        if finite:
+            rank = sorted(finite.items(), key=lambda kv: kv[1])
+            txt = "\n".join([f"{i+1}. {k}: {v:.1f}" for i,(k,v) in enumerate(rank)])
+            ax.text(0.98,0.02, txt, transform=ax.transAxes, ha='right', va='bottom', fontsize=8,
+                    bbox=dict(boxstyle='round', facecolor='white', alpha=0.65, edgecolor='none'))
+    save_fig(fig, outdir, f"{organism.replace(' ', '_')}_uvc_model_comparison.png")
 
 
 def plot_cfu_vs_dose(df, organism, outdir):
